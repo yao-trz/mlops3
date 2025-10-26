@@ -1,0 +1,58 @@
+# --- VCS
+.git
+.gitignore
+.gitattributes
+
+# --- OS & éditeurs
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Python / build
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.eggs/
+*.egg-info/
+build/
+dist/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.coverage
+coverage.xml
+htmlcov/
+*.log
+
+# --- Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+
+# --- Notebooks & artefacts d’expé
+notebooks/
+mlruns/
+artifacts/
+wandb/
+checkpoints/
+logs/
+
+# --- Données : inclure uniquement le CSV nécessaire à l’app
+data/**
+!data/global_house_purchase_dataset.csv
+
+# --- Modèles : ne garder que celui utilisé par l’app
+# (ajoute/retire des exceptions selon le nom de ton modèle)
+*.pkl
+!best_model.pkl
+!model.pkl
+!model (2).pkl
+
+# --- Secrets
+.env
+.env.*
