@@ -1,0 +1,119 @@
+name: CI • Test, Build & Push Docker
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/loan-default
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  test-build-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: docker-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # utile pour tags/metadata
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install deps (tests)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: pytest -q test.py
+
+      # Optional: lint Dockerfile
+      # - name: Lint Dockerfile
+      #   uses: hadolint/hadolint-action@v3.1.0
+      #   with:
+      #     dockerfile: Dockerfile
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # QEMU only if you also push arm64
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
+
+      - name: Docker meta
+        if: github.event_name != 'pull_request'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,format=short,prefix=sha-
+            type=raw,value={{date 'YYYYMMDD-HHmm'}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=${{ env.IMAGE_NAME }}
+            org.opencontainers.image.description=Streamlit ML app
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Login to DockerHub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Build for PRs (no push)
+      - name: Build (PR only)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Optional: smoke test the built image before push
+      # - name: Smoke test image (PR)
+      #   if: github.event_name == 'pull_request'
+      #   run: |
+      #     docker image ls | head -n 5
+
+      # Build & Push on main
+      - name: Build & Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Optional: Trivy scan (post-push report)
+      # - name: Trivy Image Scan
+      #   if: github.event_name != 'pull_request'
+      #   uses: aquasecurity/trivy-action@0.24.0
+      #   with:
+      #     image-ref: ${{ env.IMAGE_NAME }}:latest
+      #     format: 'table'
+      #     exit-code: '0'
+      #     vuln-type: 'os,library'
