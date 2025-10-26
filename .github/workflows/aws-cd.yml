@@ -1,0 +1,99 @@
+name: CI/CD — Push to ECR & Redeploy ECS
+
+on:
+  push:
+    branches: ["main"]
+
+concurrency:
+  group: ecs-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}  
+  ECR_REPOSITORY: mlops
+  IMAGE_TAG: latest
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ⬇️ S'assure que le repo ECR existe
+      - name: Ensure ECR repo exists
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}"
+
+      # ⬇️ Build & Push
+      - name: Build, tag and push to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build --platform linux/amd64 \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} .
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      # ⬇️ Récupère le digest de l'image "latest" et prépare la nouvelle Task Definition
+      - name: Pin task definition to image digest
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECS_TASK_FAMILY: ${{ secrets.ECS_TASK_FAMILY }}   
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+
+          # Digest de l'image que l'on vient de pousser
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --image-ids imageTag="${{ env.IMAGE_TAG }}" \
+            --query 'imageDetails[0].imageDigest' --output text)
+
+          IMAGE_URI_DIGEST="${ECR_REGISTRY}/${{ env.ECR_REPOSITORY }}@${DIGEST}"
+          echo "Using image digest: ${IMAGE_URI_DIGEST}"
+
+          # Récupère la task def actuelle (source de vérité)
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_TASK_FAMILY" \
+            --query 'taskDefinition' > td.json
+
+          # Met à jour l'image du premier container (adapter l'index si plusieurs containers)
+          cat td.json | \
+            jq --arg IMG "$IMAGE_URI_DIGEST" \
+              '.containerDefinitions[0].image = $IMG
+               | del(.taskDefinitionArn, .requiresAttributes, .revision, .status, .registeredAt, .registeredBy, .compatibilities)' \
+            > td-new.json
+
+          # Enregistre une nouvelle révision
+          NEW_TD_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://td-new.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "NEW_TD_ARN=$NEW_TD_ARN" >> $GITHUB_ENV
+
+      # ⬇️ Met à jour le service avec la nouvelle révision
+      - name: Update ECS Service
+        env:
+          ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+        run: |
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$NEW_TD_ARN"
+
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE"
+          echo "✅ Deployed $(echo $NEW_TD_ARN) successfully."
